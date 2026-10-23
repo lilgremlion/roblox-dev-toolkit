@@ -1,0 +1,15 @@
+# PyInstaller build output — the exe ships via GitHub Releases, not the repo
+build/
+dist/
+*.manifest
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# OS noise
+Thumbs.db
+desktop.ini
