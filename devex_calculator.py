@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Roblox Dev & Daily Toolkit v2.1 (single-file, offline)
+Roblox Dev & Daily Toolkit v2.2 (single-file, offline)
 ------------------------------------------------------
 One window, ten live calculators with a modern dark/light UI:
 
@@ -11,7 +11,9 @@ One window, ten live calculators with a modern dark/light UI:
 - Dark theme by default, light toggle with cross-fade; DPI-aware on Windows
 - Effects: aurora glow behind cards, gradient heading wash, eased hovers,
   slide-in tool transitions, pulsing DevEx warning
-- Keyboard: Ctrl+1..0 switch tools, Enter copies, Esc clears, Ctrl+A selects
+- "Reduce motion" toggle (persisted) turns every effect into an instant swap
+- Keyboard: Ctrl+1..0 tools, Ctrl+T theme, Ctrl+M motion, Enter copies,
+  Esc clears, Ctrl+A selects all
 """
 
 import ctypes
@@ -20,6 +22,8 @@ import math
 import os
 import time
 import tkinter as tk
+from tkinter import font as tkfont
+from calendar import monthrange
 from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -44,7 +48,12 @@ ROBUX_PACKAGES = [
 ]
 
 APP_TITLE = "Dev Toolkit"
-VERSION = "2.1"
+VERSION = "2.2"
+
+FRAME_MS = 16            # ~60 fps for the shared animation timer
+AURORA_RINGS = 5         # rings per drifting blob (was 10 — half the redraw cost)
+THEME_FADE_MS = 240      # theme cross-fade duration
+THEME_FADE_STEPS = 10    # deliberate steps (not one repaint per 16 ms frame)
 
 TIMEZONES = [
     "UTC", "US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
@@ -80,6 +89,22 @@ UNIT_FACTORS = {
         "mL": 1.0, "L": 1000.0, "fl oz": 29.5735295625,
         "cup": 236.5882365, "qt": 946.352946, "gal": 3785.411784,
     },
+    "Area": {  # base unit: square meter
+        "cm²": 0.0001, "m²": 1.0, "km²": 1_000_000.0,
+        "ft²": 0.09290304, "yd²": 0.83612736,
+        "acre": 4046.8564224, "ha": 10_000.0,
+    },
+    "Speed": {  # base unit: meter / second
+        "m/s": 1.0, "km/h": 1 / 3.6, "mph": 0.44704, "knot": 0.514444,
+    },
+    "Energy": {  # base unit: joule
+        "J": 1.0, "kJ": 1000.0, "cal": 4.184, "kcal": 4184.0,
+        "Wh": 3600.0, "kWh": 3_600_000.0,
+    },
+    "Pressure": {  # base unit: pascal
+        "Pa": 1.0, "kPa": 1000.0, "bar": 100_000.0,
+        "psi": 6894.757293168, "atm": 101_325.0,
+    },
     "Data": {
         "B": 1.0, "KB": 1024.0, "MB": 1024.0 ** 2, "GB": 1024.0 ** 3, "TB": 1024.0 ** 4,
     },
@@ -93,6 +118,15 @@ UNIT_NAMES = {
              "oz": "Ounces", "lb": "Pounds"},
     "Volume": {"mL": "Milliliters", "L": "Liters", "fl oz": "Fluid ounces (US)",
                "cup": "Cups", "qt": "Quarts", "gal": "Gallons"},
+    "Area": {"cm²": "Square centimeters", "m²": "Square meters",
+             "km²": "Square kilometers", "ft²": "Square feet",
+             "yd²": "Square yards", "acre": "Acres", "ha": "Hectares"},
+    "Speed": {"m/s": "Meters/second", "km/h": "Kilometers/hour",
+              "mph": "Miles/hour", "knot": "Knots"},
+    "Energy": {"J": "Joules", "kJ": "Kilojoules", "cal": "Calories",
+               "kcal": "Kilocalories", "Wh": "Watt-hours", "kWh": "Kilowatt-hours"},
+    "Pressure": {"Pa": "Pascals", "kPa": "Kilopascals", "bar": "Bar",
+                 "psi": "Pounds/square inch", "atm": "Atmospheres"},
     "Data": {"B": "Bytes", "KB": "Kilobytes", "MB": "Megabytes",
              "GB": "Gigabytes", "TB": "Terabytes"},
     "Temperature": {"°C": "Celsius", "°F": "Fahrenheit", "K": "Kelvin"},
@@ -105,18 +139,18 @@ THEMES = {
     "dark": {
         "bg": "#0e1014", "side": "#12151b", "card": "#171a22",
         "entry": "#1e222c", "border": "#2a2f3c", "hover": "#222735",
-        "fg": "#e8ebf3", "muted": "#8a92a6", "accent": "#4d8dff",
+        "fg": "#e8ebf3", "muted": "#8a92a6", "accent": "#2b63f0",
         "accent_fg": "#ffffff", "warning": "#f0b357", "invalid": "#e0685f",
         "glow1": "#2b4f8f", "glow2": "#46357f",
         "hover_up": True, "status": "#12151b",
     },
     "light": {
-        "bg": "#f4f6fa", "side": "#e9edf4", "card": "#ffffff",
-        "entry": "#ffffff", "border": "#dde2ec", "hover": "#eef1f7",
-        "fg": "#12161f", "muted": "#5c6575", "accent": "#2f6bff",
+        "bg": "#eef1f7", "side": "#e5eaf2", "card": "#ffffff",
+        "entry": "#ffffff", "border": "#d2d9e6", "hover": "#e8edf5",
+        "fg": "#12161f", "muted": "#4f5868", "accent": "#2563eb",
         "accent_fg": "#ffffff", "warning": "#b45309", "invalid": "#c94b3f",
-        "glow1": "#dbe6ff", "glow2": "#eae4ff",
-        "hover_up": False, "status": "#e9edf4",
+        "glow1": "#cfddff", "glow2": "#e3dcff",
+        "hover_up": False, "status": "#e5eaf2",
     },
 }
 
@@ -222,6 +256,102 @@ def monthly_payment(principal, annual_rate_pct, years):
     return p * r / (1 - (1 + r) ** -n)
 
 
+def add_months(start, months):
+    """Calendar-add months, clamping the day to the target month's length."""
+    y = start.year + (start.month - 1 + months) // 12
+    m = (start.month - 1 + months) % 12 + 1
+    day = min(start.day, monthrange(y, m)[1])
+    return date(y, m, day)
+
+
+def business_days_between(d1, d2):
+    """Mon–Fri days in the half-open interval (start, end]; signed result."""
+    sign = 1 if d2 >= d1 else -1
+    a, b = (d1, d2) if d2 >= d1 else (d2, d1)
+    weeks, rem = divmod((b - a).days, 7)
+    count = weeks * 5
+    for i in range(rem):
+        if (a + timedelta(days=i + 1)).weekday() < 5:
+            count += 1
+    return sign * count
+
+
+def add_business_days(start, n):
+    """Move forward/back by n weekdays (Mon–Fri, weekends skipped)."""
+    step = 1 if n >= 0 else -1
+    remaining = abs(int(n))
+    current = start
+    while remaining:
+        current += timedelta(days=step)
+        if current.weekday() < 5:
+            remaining -= 1
+    return current
+
+
+def years_between(start, end):
+    """(years, months, days) between two dates, calendar-accurate."""
+    years = end.year - start.year
+    months = end.month - start.month
+    days = end.day - start.day
+    if days < 0:
+        months -= 1
+        days += (date(end.year, end.month, 1) - timedelta(days=1)).day
+    if months < 0:
+        years -= 1
+        months += 12
+    return years, months, days
+
+
+def cheapest_package_plan(target_robux):
+    """Cheapest combination of store packages covering at least target_robux.
+
+    Returns {'robux': int, 'cents': int, 'parts': [(pack_robux, count), ...]}
+    or None when the target is unusable. Exact DP over 100 R$ units; capped so
+    a runaway entry cannot freeze the UI.
+    """
+    try:
+        target = float(target_robux)
+    except (TypeError, ValueError):
+        return None
+    if target <= 0 or target > 10_000_000:
+        return None
+    target_units = int(math.ceil(target / 100.0))
+    items = []
+    for robux, price in ROBUX_PACKAGES:
+        units = int(round(robux / 100.0))
+        cents = int(round(price * 100))
+        if units > 0 and cents > 0:
+            items.append((units, cents, robux))
+    if not items:
+        return None
+    max_units = max(u for u, _c, _r in items)
+    limit = target_units + max_units
+    inf = float("inf")
+    dp = [inf] * (limit + 1)
+    prev = [None] * (limit + 1)
+    dp[0] = 0
+    for u in range(limit + 1):
+        base = dp[u]
+        if base == inf:
+            continue
+        for units, cents, _robux in items:
+            nu = u + units
+            if nu <= limit and base + cents < dp[nu]:
+                dp[nu] = base + cents
+                prev[nu] = (u, units)
+    best = min((u for u in range(target_units, limit + 1) if dp[u] < inf),
+               key=lambda u: (dp[u], u))
+    counts = {}
+    u = best
+    while u > 0:
+        pu, units = prev[u]
+        counts[units] = counts.get(units, 0) + 1
+        u = pu
+    parts = [(robux, counts[units]) for units, _c, robux in items if counts.get(units)]
+    parts.sort(reverse=True)
+    return {"robux": best * 100, "cents": int(dp[best]), "parts": parts}
+
+
 def unit_convert(category, amount, unit_from, unit_to):
     """Convert via base-unit factors; Temperature goes through Celsius."""
     try:
@@ -270,15 +400,30 @@ def config_path():
 
 
 def load_config():
-    defaults = {"theme": "dark", "tool": "devex", "inputs": {}}
+    """Read persisted settings, validating every key (a hand-edited or older
+    config file must never crash the app)."""
+    defaults = {"theme": "dark", "tool": "devex", "inputs": {}, "reduce_motion": False}
     try:
         data = json.loads(config_path().read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            for key in defaults:
-                if key in data:
-                    defaults[key] = data[key]
     except (OSError, ValueError):
-        pass
+        return defaults
+    if not isinstance(data, dict):
+        return defaults
+    if data.get("theme") in THEMES:
+        defaults["theme"] = data["theme"]
+    if isinstance(data.get("tool"), str):
+        defaults["tool"] = data["tool"]
+    if isinstance(data.get("reduce_motion"), bool):
+        defaults["reduce_motion"] = data["reduce_motion"]
+    inputs = data.get("inputs")
+    if isinstance(inputs, dict):
+        clean = {}
+        for tool_key, fields in inputs.items():
+            if not isinstance(tool_key, str) or not isinstance(fields, dict):
+                continue
+            clean[tool_key] = {k: v for k, v in fields.items()
+                               if isinstance(k, str) and isinstance(v, str)}
+        defaults["inputs"] = clean
     return defaults
 
 
@@ -320,45 +465,83 @@ def ease_out(t):
 # ---------------------------------------------------------------------------
 
 class FX:
-    """~30 fps after-loop: each animation gets eased progress 0..1 (or loops)."""
+    """~60 fps after-loop: each animation gets eased progress 0..1 (or loops).
+
+    Every step is isolated: a widget that disappears mid-animation (tool
+    switch, theme change, window close) drops that animation instead of killing
+    the whole tick. Timing comes from perf_counter, so a late frame never
+    slows the animation down.
+    """
 
     def __init__(self, root):
         self.root = root
         self.active = []   # [key, t0, dur, step, done, loop]
         self.running = False
+        self._job = None
 
     def start(self, key, dur, step, done=None, loop=False):
         self.cancel(key)
         self.active.append([key, time.perf_counter() * 1000.0, dur, step, done, loop])
         if not self.running:
             self.running = True
-            self.root.after(30, self._tick)
+            self._schedule()
 
     def cancel(self, key):
         self.active = [a for a in self.active if a[0] != key]
 
+    def keys(self):
+        return [a[0] for a in self.active]
+
+    def stop(self):
+        """Stop everything (window closing) and cancel the pending tick."""
+        self.active = []
+        self.running = False
+        if self._job is not None:
+            try:
+                self.root.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+
+    def _schedule(self):
+        try:
+            self._job = self.root.after(FRAME_MS, self._tick)
+        except tk.TclError:
+            self._job = None
+            self.running = False
+
     def _tick(self):
+        self._job = None
         try:
             now = time.perf_counter() * 1000.0
+            snapshot = list(self.active)
             still = []
-            for key, t0, dur, step, done, loop in self.active:
+            for key, t0, dur, step, done, loop in snapshot:
                 elapsed = now - t0
                 if loop:
-                    step((elapsed / max(dur, 1)) % 1.0)
-                    still.append([key, t0, dur, step, done, loop])
+                    try:
+                        step((elapsed / max(dur, 1)) % 1.0)
+                        still.append([key, t0, dur, step, done, loop])
+                    except tk.TclError:
+                        pass  # one vanished widget must not stop the loop
                     continue
                 t = min(1.0, elapsed / max(dur, 1))
                 try:
                     step(ease_out(t))
-                except tk.TclError:  # widget vanished mid-animation
-                    continue
+                except tk.TclError:
+                    continue  # widget vanished mid-animation — drop this anim
                 if t < 1.0:
                     still.append([key, t0, dur, step, done, loop])
                 elif done:
-                    done()
-            self.active = still
+                    try:
+                        done()
+                    except tk.TclError:
+                        pass
+            # Animations started from a done() callback must survive this tick.
+            added = [a for a in self.active if all(a is not b for b in snapshot)]
+            self.active = still + added
             if self.active:
-                self.root.after(30, self._tick)
+                self._schedule()
             else:
                 self.running = False
         except tk.TclError:  # root destroyed mid-flight — stop quietly
@@ -390,8 +573,10 @@ class RoundedButton(tk.Canvas):
         self.canvas_role = canvas_role
         self.font = font or ("Segoe UI", 10, "bold")
         self._base = ""
+        self._fg = ""
         self._shape = None
         self._label = None
+        self._draw_sig = None
         self._fx_key = f"hover{id(self)}"
         app.buttons.append(self)
         self.retheme(app.colors)
@@ -411,25 +596,48 @@ class RoundedButton(tk.Canvas):
         c = self.app.colors
         return mix(self._base, "#ffffff" if c["hover_up"] else "#000000", HOVER_STRENGTH)
 
+    def _set_fill(self, color):
+        if self._shape is not None:
+            try:
+                self.itemconfig(self._shape, fill=color)
+            except tk.TclError:
+                pass
+
     def _on_enter(self, _e):
         self.configure(cursor="hand2")
-        self.app.fx.start(self._fx_key, 110, lambda t: self.itemconfig(
-            self._shape, fill=mix(self._base, self._hover_target(), t)))
+        if self.app.reduce_motion:
+            self.app.fx.cancel(self._fx_key)
+            self._set_fill(self._hover_target())
+            return
+        self.app.fx.start(self._fx_key, 110, lambda t: self._set_fill(
+            mix(self._base, self._hover_target(), t)))
 
     def _on_leave(self, _e):
         self.configure(cursor="")
-        self.app.fx.start(self._fx_key, 130, lambda t: self.itemconfig(
-            self._shape, fill=mix(self._hover_target(), self._base, t)))
+        if self.app.reduce_motion:
+            self.app.fx.cancel(self._fx_key)
+            self._set_fill(self._base)
+            return
+        self.app.fx.start(self._fx_key, 130, lambda t: self._set_fill(
+            mix(self._hover_target(), self._base, t)))
 
     def _press(self, _e):
-        self.itemconfig(self._shape, fill=self._hover_target())
+        self._set_fill(self._hover_target())
         self.command()
 
     def _draw(self):
-        self.delete("all")
         w, h = self.winfo_width(), self.winfo_height()
         if w < 8 or h < 8:  # not mapped yet — use requested size
-            w, h = int(self["width"]), int(self["height"])
+            try:
+                w, h = int(self["width"]), int(self["height"])
+            except (ValueError, tk.TclError):
+                w, h = 120, 32
+        w, h = max(w, 12), max(h, 12)
+        sig = (w, h, self._base, self._fg, self.text)
+        if sig == self._draw_sig and self._shape is not None:
+            return  # spurious <Configure> — nothing changed
+        self._draw_sig = sig
+        self.delete("all")
         r = min(14, h // 2)
         pts = [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
                w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
@@ -439,7 +647,11 @@ class RoundedButton(tk.Canvas):
 
     def set_text(self, text):
         self.text = text
-        self.itemconfig(self._label, text=text)
+        if self._label is not None:
+            try:
+                self.itemconfig(self._label, text=text)
+            except tk.TclError:
+                pass
 
 
 class Dropdown(tk.Frame):
@@ -559,6 +771,12 @@ class Tool:
         for var, callback in self._pending_traces:
             var.trace_add("write", callback)
 
+    # -- change plumbing -----------------------------------------------------
+    def _changed(self):
+        """One trace path: refresh once, then let the shell re-measure."""
+        self.refresh()
+        self.app.schedule_fit()
+
     # -- heading -------------------------------------------------------------
     def heading(self):
         self.glow = tk.Canvas(self.frame, height=52, bd=0, highlightthickness=0)
@@ -572,9 +790,12 @@ class Tool:
         """Horizontal color wash (the 'gradient hero' under each tool title)."""
         c = self.app.colors
         cv = self.glow
-        cv.delete("all")
-        w = max(self.frame.winfo_reqwidth(), cv.winfo_width(), 400)
-        h = int(cv["height"])
+        try:
+            cv.delete("all")
+            w = max(self.frame.winfo_reqwidth(), cv.winfo_width(), 400)
+            h = int(cv["height"])
+        except tk.TclError:
+            return
         steps = 64
         for i in range(steps):
             t = i / steps
@@ -592,16 +813,31 @@ class Tool:
 
     def animate_entry(self):
         """Grow the accent underline when this tool becomes active."""
+        try:
+            h = self.glow.winfo_height()
+        except tk.TclError:
+            return
+        if self.app.reduce_motion:
+            try:
+                self.glow.coords(self.badge, 6, h - 4, 98, h - 1)
+            except tk.TclError:
+                pass
+            return
+
         def step(t):
             try:
                 self.glow.coords(self.badge, 6, self.glow.winfo_height() - 4,
                                  6 + 92 * t, self.glow.winfo_height() - 1)
             except tk.TclError:
                 pass
-        self.app.fx.start(f"badge{self.key}", 240, step,
-                          done=lambda: self.glow.coords(self.badge, 6,
-                                                        self.glow.winfo_height() - 4,
-                                                        98, self.glow.winfo_height() - 1))
+
+        def done():
+            try:
+                self.glow.coords(self.badge, 6, self.glow.winfo_height() - 4,
+                                 98, self.glow.winfo_height() - 1)
+            except tk.TclError:
+                pass
+        self.app.fx.start(f"badge{self.key}", 240, step, done=done)
 
     def muted_line(self, text, pady=(0, 6)):
         lbl = tk.Label(self.frame, text=text, font=("Segoe UI", 9), anchor="w",
@@ -618,16 +854,17 @@ class Tool:
         self.app.tag(entry, kind="entry")
         return entry
 
-    def _register(self, key, var, entry=None):
+    def _register(self, key, var, entry=None, trace=True):
         self.vars[key] = var
         if entry is not None:
             self.entries[key] = entry
-        self._pending_traces.append((var, lambda *_: self.refresh()))
+        if trace:
+            self._pending_traces.append((var, lambda *_: self._changed()))
         if self.primary is None and entry is not None:
             self.primary = entry
         return var
 
-    def field(self, label, key, width=None):
+    def field(self, label, key, width=None, trace=True):
         """Labeled entry row returning the StringVar; refresh() runs on edit."""
         lbl = tk.Label(self.frame, text=label, font=("Segoe UI", 10))
         lbl.grid(row=self.row, column=0, sticky="w", pady=(8, 0), padx=(0, 12))
@@ -637,7 +874,7 @@ class Tool:
         if width:
             entry.configure(width=width)
         entry.grid(row=self.row, column=1, sticky="ew", pady=(8, 0), ipady=3)
-        self._register(key, var, entry)
+        self._register(key, var, entry, trace=trace)
         self.row += 1
         return var
 
@@ -651,7 +888,7 @@ class Tool:
         self.entries[key] = entry
         self.vars[key] = var
         if with_trace:
-            self._pending_traces.append((var, lambda *_: self.refresh()))
+            self._pending_traces.append((var, lambda *_: self._changed()))
         return var, entry
 
     def dropdown_field(self, label, options, key, default=None):
@@ -670,7 +907,7 @@ class Tool:
         self.dropdown_keys.add(key)
         var.set(default if default is not None else (options[0][1] if options else ""))
         self.row += 1
-        self._pending_traces.append((var, lambda *_: self.refresh()))
+        self._pending_traces.append((var, lambda *_: self._changed()))
         return var, dd
 
     def _result_big(self):
@@ -691,6 +928,18 @@ class Tool:
     def results(self):
         self.row += 1  # spacer
         return self._result_big()
+
+    def extra_line(self, fg="accent"):
+        """Third result line for secondary summaries (payoff, cheapest plan…)."""
+        row = self.row + 1
+        var = tk.StringVar()
+        lbl = tk.Label(self.frame, textvariable=var, font=("Segoe UI", 9),
+                       anchor="w", justify="left", wraplength=560)
+        lbl.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.app.tag(lbl, bg="card", fg=fg)
+        self.row = row
+        self.extra = var
+        return var
 
     def _result_inline(self, master, var):
         lbl = tk.Label(master, textvariable=var, font=("Segoe UI", 11, "bold"), anchor="e")
@@ -713,10 +962,20 @@ class Tool:
     def _on_warn_change(self, *_):
         """Non-empty warning text starts a gentle breathing pulse on the label."""
         if self.warn_var.get():
-            self._start_warn_pulse()
+            if self.app.reduce_motion:
+                self.app.fx.cancel(f"warn{self.key}")
+                try:
+                    self.warn_lbl.config(fg=self.app.colors["warning"])
+                except tk.TclError:
+                    pass
+            else:
+                self._start_warn_pulse()
         else:
             self.app.fx.cancel(f"warn{self.key}")
-            self.warn_lbl.config(fg=self.app.colors["warning"])
+            try:
+                self.warn_lbl.config(fg=self.app.colors["warning"])
+            except tk.TclError:
+                pass
 
     def _start_warn_pulse(self):
         def pulse(t):
@@ -732,6 +991,8 @@ class Tool:
         self.app.tag(row, bg="card")
         RoundedButton(self.app, row, "Copy result", self.app.copy_current,
                       width=110, height=30, role="accent")
+        RoundedButton(self.app, row, "Copy all", self.app.copy_all_current,
+                      width=84, height=30, role="ghost", font=("Segoe UI", 9))
         RoundedButton(self.app, row, "Clear", self.app.clear_current,
                       width=70, height=30, role="ghost", font=("Segoe UI", 10))
         self.row += 1
@@ -744,14 +1005,22 @@ class Tool:
         c = self.app.colors
         if bad:
             self._invalid.add(key)
-            entry.configure(highlightbackground=c["invalid"])
+            entry.configure(highlightbackground=c["invalid"],
+                            highlightcolor=c["invalid"])
         else:
             self._invalid.discard(key)
-            entry.configure(highlightbackground=c["border"])
+            entry.configure(highlightbackground=c["border"],
+                            highlightcolor=c["accent"])
 
     def apply_invalid(self, c):
         for key in self._invalid:
-            self.entries[key].configure(highlightbackground=c["invalid"])
+            entry = self.entries.get(key)
+            if entry is not None:
+                try:
+                    entry.configure(highlightbackground=c["invalid"],
+                                    highlightcolor=c["invalid"])
+                except tk.TclError:
+                    pass
 
     def focus_primary(self):
         if self.primary and self.primary.winfo_ismapped():
@@ -765,12 +1034,24 @@ class Tool:
     def refresh(self):
         pass
 
-    def retheme(self, c):
-        self._draw_glow()
+    def retheme(self, c, glow=True):
+        if glow:
+            self._draw_glow()
         self.apply_invalid(c)
 
     def copy_text(self):
         return None
+
+    def copy_all_text(self):
+        """Everything useful on screen, one item per line."""
+        lines = []
+        for name in ("big", "sub", "extra", "warn_var"):
+            var = getattr(self, name, None)
+            if isinstance(var, tk.StringVar):
+                text = var.get().strip()
+                if text:
+                    lines.append(text)
+        return "\n".join(lines) or (self.copy_text() or None)
 
     def clear(self):
         for key, var in self.vars.items():
@@ -786,11 +1067,14 @@ class Tool:
 class DevExTool(Tool):
     key, title = "devex", "DevEx Cash-Out"
     note = "Cash out earned Robux at the published DevEx rate."
+    HINT = "Enter Robux earned (or USD) to see the cash-out."
 
     def build(self):
         self.heading()
-        self.robux = self.field("Robux", "robux")
-        self.usd = self.field("USD", "usd")
+        # No generic refresh traces: the two custom handlers below are the one
+        # trace path for both fields, so each keystroke refreshes exactly once.
+        self.robux = self.field("Robux", "robux", trace=False)
+        self.usd = self.field("USD", "usd", trace=False)
         self.big, self.sub = self.results()
         self.warning_line()
         self.actions()
@@ -801,34 +1085,42 @@ class DevExTool(Tool):
     def _from_robux(self):
         if self._syncing:
             return
-        robux = parse_amount(self.robux.get())
+        state, robux = read_amount(self.robux.get())
         self._syncing = True
-        self.usd.set("" if robux is None else format_usd_edit(robux * RUBUX_TO_USD))
+        self.usd.set(format_usd_edit(robux * RUBUX_TO_USD) if state == "ok" else "")
         self._syncing = False
-        self.refresh(robux=robux)
+        self._show(robux if state == "ok" else None)
 
     def _from_usd(self):
         if self._syncing:
             return
-        usd = parse_amount(self.usd.get())
+        state, usd = read_amount(self.usd.get())
         self._syncing = True
-        self.robux.set("" if usd is None else format_robux(usd / RUBUX_TO_USD))
+        self.robux.set(format_robux(usd / RUBUX_TO_USD) if state == "ok" else "")
         self._syncing = False
-        self.refresh(usd=usd)
+        self._show(usd / RUBUX_TO_USD if state == "ok" else None)
 
-    def refresh(self, robux=None, usd=None):
+    def refresh(self):
+        """Load/clear path: derive from whichever field holds a valid value."""
+        r_state, robux = read_amount(self.robux.get())
+        u_state, usd = read_amount(self.usd.get())
+        if r_state == "ok":
+            self._show(robux)
+        elif u_state == "ok":
+            self._show(usd / RUBUX_TO_USD)
+        else:
+            self._show(None)
+
+    def _show(self, robux):
         self.mark("robux", read_amount(self.robux.get())[0] == "bad")
         self.mark("usd", read_amount(self.usd.get())[0] == "bad")
-        if robux is None and usd is None:
-            if not self.robux.get() and not self.usd.get():
-                self.big.set("")
-                self.sub.set("")
-                self.warn_var.set("")
-            return
         if robux is None:
-            robux = usd / RUBUX_TO_USD
-        if usd is None:
-            usd = robux * RUBUX_TO_USD
+            self.big.set("")
+            self.warn_var.set("")
+            self.sub.set("" if (self.robux.get() or self.usd.get()) else self.HINT)
+            self.app.schedule_fit()
+            return
+        usd = robux * RUBUX_TO_USD
         self.big.set(f"{format_robux(robux)} R$ = {format_usd(usd)}")
         self.sub.set("Gross amounts, before taxes or fees.")
         if 0 < robux < DEX_MINIMUM_ROBUX:
@@ -839,6 +1131,7 @@ class DevExTool(Tool):
             )
         else:
             self.warn_var.set("")
+        self.app.schedule_fit()
 
     def copy_text(self):
         return self.big.get() or None
@@ -847,6 +1140,7 @@ class DevExTool(Tool):
 class BuyTool(Tool):
     key, title = "buy", "Buy Robux"
     note = "Pick the package you'd buy — the rate matches the store tier exactly."
+    HINT = "Pick a package, then type USD or Robux — both stay in sync."
 
     def build(self):
         self.heading()
@@ -859,77 +1153,104 @@ class BuyTool(Tool):
             pairs.append((display, f"{robux}|{price}"))
         self.package_var, _ = self.dropdown_field("Package", pairs, "package",
                                                   default=pairs[-1][1])
-        self.usd = self.field("USD", "usd")
-        self.robux = self.field("Robux", "robux")
+        self.usd = self.field("USD", "usd", trace=False)
+        self.robux = self.field("Robux", "robux", trace=False)
+        self.want = self.field("Want at least R$", "want")
         self.big, self.sub = self.results()
+        self.extra = self.extra_line()
         self.actions()
         self._syncing = False
+        self._fixing = False
         self.usd.trace_add("write", lambda *_: self._from_usd())
         self.robux.trace_add("write", lambda *_: self._from_robux())
 
-    def _rate(self):
-        """(rate, pack_robux, pack_price) for the selected package.
-
-        Falls back to the smallest package if a remembered value is unusable —
-        a hand-edited config must never crash the tool.
-        """
-        def parse(text):
-            parts = text.split("|")
-            if len(parts) == 2:
-                try:
-                    robux_n, price_n = int(parts[0]), float(parts[1])
-                except ValueError:
-                    return None
+    # -- package handling ----------------------------------------------------
+    def _package(self):
+        """(rate, pack_robux, pack_price) — pure; never mutates the var."""
+        parts = (self.package_var.get() or "").split("|")
+        if len(parts) == 2:
+            try:
+                robux_n, price_n = int(parts[0]), float(parts[1])
+            except ValueError:
+                pass
+            else:
                 if robux_n > 0 and price_n > 0:
                     return robux_n / price_n, robux_n, price_n
-            return None
+        r0, p0 = ROBUX_PACKAGES[0]  # safe fallback for a hand-edited config
+        return r0 / p0, r0, p0
 
-        result = parse(self.package_var.get())
-        if result is None:
-            r0, p0 = ROBUX_PACKAGES[0]
+    def _rate(self):
+        return self._package()[0]
+
+    def _sanitize_package(self):
+        """Reset an unusable remembered package. Guarded against trace recursion."""
+        valid = {f"{r}|{p}" for r, p in ROBUX_PACKAGES}
+        if self.package_var.get() in valid or self._fixing:
+            return
+        self._fixing = True
+        r0, p0 = ROBUX_PACKAGES[0]
+        try:
             self.package_var.set(f"{r0}|{p0}")
-            result = parse(self.package_var.get())
-        if result is None:  # cannot happen; extra guard for clarity
-            r0, p0 = ROBUX_PACKAGES[0]
-            result = r0 / p0, r0, p0
-        return result
+        finally:
+            self._fixing = False
 
     def _from_usd(self):
         if self._syncing:
             return
         state, usd = read_amount(self.usd.get())
-        robux = usd * self._rate()[0] if state == "ok" else None
         self._syncing = True
-        self.robux.set("" if robux is None else format_robux(robux))
+        self.robux.set(format_robux(usd * self._rate()) if state == "ok" else "")
         self._syncing = False
-        self.refresh(usd=usd)
+        self.refresh()
 
     def _from_robux(self):
         if self._syncing:
             return
         state, robux = read_amount(self.robux.get())
-        usd = robux / self._rate()[0] if state == "ok" else None
         self._syncing = True
-        self.usd.set("" if usd is None else format_usd_edit(usd))
+        self.usd.set(format_usd_edit(robux / self._rate()) if state == "ok" else "")
         self._syncing = False
-        self.refresh(robux=robux)
+        self.refresh()
 
-    def refresh(self, usd=None, robux=None):
-        self.mark("usd", read_amount(self.usd.get())[0] == "bad")
-        self.mark("robux", read_amount(self.robux.get())[0] == "bad")
+    def refresh(self):
+        self._sanitize_package()
+        u_state, usd = read_amount(self.usd.get())
+        r_state, robux = read_amount(self.robux.get())
+        self.mark("usd", u_state == "bad")
+        self.mark("robux", r_state == "bad")
+        self._update_cheapest()
+        rate, pack_robux, pack_price = self._package()
         if usd is None and robux is None:
-            if not self.usd.get() and not self.robux.get():
-                self.big.set("")
-                self.sub.set("")
+            self.big.set("")
+            self.sub.set("" if (self.usd.get() or self.robux.get()) else self.HINT)
+            self.app.schedule_fit()
             return
         if usd is None:
-            usd = robux / self._rate()[0]
+            usd = robux / rate
         if robux is None:
-            robux = usd * self._rate()[0]
-        rate, pack_robux, pack_price = self._rate()
+            robux = usd * rate
         self.big.set(f"{format_usd(usd)} buys ~{format_num(round(robux))} R$")
         self.sub.set(f"Rate {rate:.1f} R$ per $1.00 "
                      f"({format_num(pack_robux)} R$ pack — ${pack_price:.2f})")
+        self.app.schedule_fit()
+
+    def _update_cheapest(self):
+        state, want = read_amount(self.want.get())
+        self.mark("want", state == "bad")
+        if state != "ok" or want is None:
+            self.extra.set("")
+            return
+        plan = cheapest_package_plan(want)
+        if plan is None:
+            self.extra.set("Enter a target up to 10,000,000 R$ for a suggestion.")
+            return
+        combo = " + ".join(f"{count}× {format_num(robux)} R$"
+                           for robux, count in plan["parts"])
+        overshoot = plan["robux"] - want
+        extra = f" (+{format_num(overshoot)} R$ extra)" if overshoot >= 1 else ""
+        self.extra.set(f"Cheapest for at least {format_num(want)} R$: {combo} = "
+                       f"{format_num(plan['robux'])} R$ for "
+                       f"${plan['cents'] / 100:,.2f}{extra}")
 
     def copy_text(self):
         return self.big.get() or None
@@ -937,25 +1258,56 @@ class BuyTool(Tool):
 
 class FeeTool(Tool):
     key, title = "fees", "Marketplace Fees"
-    note = f"Roblox takes {MARKETPLACE_FEE:.0%} of most sales. Enter the gross sale to see your cut."
+    note = (f"Roblox takes {MARKETPLACE_FEE:.0%} of most sales. Enter the gross "
+            "sale — or the net you want — and the other side fills in.")
+    HINT = "Enter a gross sale or the net you want to receive."
 
     def build(self):
         self.heading()
-        self.gross = self.field("Gross R$", "gross")
+        self.gross = self.field("Gross R$", "gross", trace=False)
+        self.net = self.field("Desired net R$", "net", trace=False)
         self.big, self.sub = self.results()
         self.actions()
+        self._syncing = False
+        self.gross.trace_add("write", lambda *_: self._from_gross())
+        self.net.trace_add("write", lambda *_: self._from_net())
+
+    def _from_gross(self):
+        if self._syncing:
+            return
+        state, gross = read_amount(self.gross.get())
+        self._syncing = True
+        self.net.set(format_robux(gross * (1 - MARKETPLACE_FEE)) if state == "ok" else "")
+        self._syncing = False
+        self.refresh()
+
+    def _from_net(self):
+        if self._syncing:
+            return
+        state, net = read_amount(self.net.get())
+        self._syncing = True
+        self.gross.set(format_robux(net / (1 - MARKETPLACE_FEE)) if state == "ok" else "")
+        self._syncing = False
+        self.refresh()
 
     def refresh(self):
-        state, gross = read_amount(self.gross.get())
-        self.mark("gross", state == "bad")
-        if state != "ok":
+        g_state, gross = read_amount(self.gross.get())
+        n_state, net = read_amount(self.net.get())
+        self.mark("gross", g_state == "bad")
+        self.mark("net", n_state == "bad")
+        if gross is None and net is None:
             self.big.set("")
-            self.sub.set("")
+            self.sub.set("" if (self.gross.get() or self.net.get()) else self.HINT)
+            self.app.schedule_fit()
             return
-        net = gross * (1 - MARKETPLACE_FEE)
+        if gross is not None:
+            net = gross * (1 - MARKETPLACE_FEE)
+        else:
+            gross = net / (1 - MARKETPLACE_FEE)
         self.big.set(f"{format_robux(gross)} R$ → {format_robux(net)} R$ after fees")
         self.sub.set(f"Fee: {format_robux(gross * MARKETPLACE_FEE)} R$ · "
                      f"Net ≈ {format_usd(net * RUBUX_TO_USD)} at DevEx rate")
+        self.app.schedule_fit()
 
     def copy_text(self):
         return self.big.get() or None
@@ -964,6 +1316,7 @@ class FeeTool(Tool):
 class SplitTool(Tool):
     key, title = "split", "Payout Splitter"
     note = "Equal split of group payouts. The optional cut % is removed first."
+    HINT = "Enter the payout total and how many people split it."
 
     def build(self):
         self.heading()
@@ -982,7 +1335,7 @@ class SplitTool(Tool):
         cut = parse_amount(self.cut.get()) or 0.0
         if total is None or people is None or people < 1:
             self.big.set("")
-            self.sub.set("")
+            self.sub.set("" if (self.total.get() or self.people.get()) else self.HINT)
             return
         remaining = total * (1 - min(cut, 100.0) / 100.0)
         each = int(remaining // people)
@@ -1061,7 +1414,8 @@ class PercentTool(Tool):
 
 class UnitsTool(Tool):
     key, title = "units", "Unit Converter"
-    note = "Length, mass, volume, data sizes and temperature — all offline."
+    note = ("Length, mass, volume, area, speed, energy, pressure, data sizes "
+            "and temperature — all offline.")
 
     def build(self):
         self.heading()
@@ -1112,18 +1466,25 @@ class UnitsTool(Tool):
 
 class DatesTool(Tool):
     key, title = "dates", "Date Calculator"
-    note = "Dates as YYYY-MM-DD."
+    note = "Dates as YYYY-MM-DD. Weekdays are Mon–Fri; age is measured from the first date."
 
     def build(self):
         self.heading()
         self._build_date_row(
             pieces=[("e", "d1", 12), ("t", "to"), ("e", "d2", 12), ("r", "diff")])
-        # Second row reuses the 'd1' var; the pending trace is attached only once.
+        # Second/third rows reuse the 'd1' var; pending trace attached only once.
         self._build_date_row(
-            pieces=[("e", "d1b", 12), ("t", "±"), ("e", "ndays", 7), ("r", "add")],
+            pieces=[("e", "d1b", 12), ("t", "± days"), ("e", "ndays", 7),
+                    ("r", "add")],
+            shared_key="d1")
+        self._build_date_row(
+            pieces=[("e", "d1c", 12), ("t", "+ business days"), ("e", "biz", 7),
+                    ("r", "bizres")],
             shared_key="d1")
         self.diff_res = self.vars["diff"]
         self.add_res = self.vars["add"]
+        self.biz_res = self.vars["bizres"]
+        self.age = self.extra_line(fg="muted")
         self.actions()
 
     def _build_date_row(self, pieces, shared_key=None):
@@ -1134,13 +1495,13 @@ class DatesTool(Tool):
         for i, piece in enumerate(pieces):
             if piece[0] == "e":
                 key, width = piece[1], piece[2]
-                if shared_key and key == "d1b":
+                if shared_key and key in ("d1b", "d1c"):
                     _, entry = self.inline_field(row, key, width=width,
                                                  var=self.vars["d1"], with_trace=False)
                 else:
                     _, entry = self.inline_field(row, key, width=width)
                 entry.grid(row=0, column=i, padx=3, sticky="ew")
-                if key in ("d1", "d2", "d1b"):
+                if key in ("d1", "d2", "d1b", "d1c"):
                     row.columnconfigure(i, weight=1)
             elif piece[0] == "t":
                 lbl = tk.Label(row, text=piece[1], font=("Segoe UI", 10))
@@ -1163,24 +1524,67 @@ class DatesTool(Tool):
         except (ValueError, AttributeError):
             return None
 
+    @staticmethod
+    def _safe_add(start, days):
+        try:
+            return start + timedelta(days=days)
+        except (OverflowError, ValueError):
+            return None
+
     def refresh(self):
         d1 = self._parse(self.vars["d1"].get())
         d2 = self._parse(self.vars["d2"].get())
-        self.mark("d1", self.vars["d1"].get().strip() != "" and d1 is None)
+        bad_d1 = self.vars["d1"].get().strip() != "" and d1 is None
+        # Every widget that shares the d1 var gets the same red border.
+        self.mark("d1", bad_d1)
+        self.mark("d1b", bad_d1)
+        self.mark("d1c", bad_d1)
         self.mark("d2", self.vars["d2"].get().strip() != "" and d2 is None)
         if d1 and d2:
             days = (d2 - d1).days
+            biz = business_days_between(d1, d2)
             direction = " (reversed order)" if days < 0 else ""
-            self.diff_res.set(f"{abs(days):,} days between{direction} · {d2:%A}")
+            self.diff_res.set(f"{abs(days):,} days between{direction} · "
+                              f"{d2:%A} · {abs(biz):,} business days")
         else:
             self.diff_res.set("")
+
         n_state, n = read_signed(self.vars["ndays"].get())
         self.mark("ndays", n_state == "bad")
         if d1 and n is not None:
-            result = d1 + timedelta(days=n)
-            self.add_res.set(f"{result:%Y-%m-%d} · {result:%A}")
+            result = self._safe_add(d1, n)
+            self.add_res.set(f"{result:%Y-%m-%d} · {result:%A}" if result
+                             else "Date out of range.")
         else:
             self.add_res.set("")
+
+        b_state, biz_n = read_signed(self.vars["biz"].get())
+        self.mark("biz", b_state == "bad")
+        if d1 and biz_n is not None:
+            if abs(biz_n) > 100000:
+                self.biz_res.set("Too many business days (max 100,000).")
+            else:
+                try:
+                    result = add_business_days(d1, int(biz_n))
+                except (OverflowError, ValueError):
+                    result = None
+                self.biz_res.set(f"{result:%Y-%m-%d} · {result:%A}" if result
+                                 else "Date out of range.")
+        else:
+            self.biz_res.set("")
+
+        if d1 and d1 <= date.today():
+            y, m, dd = years_between(d1, date.today())
+            self.age.set(f"Age today: {y} years, {m} months, {dd} days")
+        elif d1:
+            self.age.set("Age: first date is in the future.")
+        else:
+            self.age.set("")
+
+    def copy_all_text(self):
+        pieces = [self.diff_res.get(), self.add_res.get(), self.biz_res.get(),
+                  self.age.get()]
+        return "\n".join(p for p in pieces if p) or None
 
     def copy_text(self):
         pieces = [t for t in (self.diff_res.get(), self.add_res.get()) if t]
@@ -1190,6 +1594,7 @@ class DatesTool(Tool):
 class LoanTool(Tool):
     key, title = "loan", "Loan / Growth"
     note = "Standard amortized payment; rate as APR %."
+    HINT = "Enter an amount, APR and term to see the monthly payment."
 
     def build(self):
         self.heading()
@@ -1197,6 +1602,7 @@ class LoanTool(Tool):
         self.rate = self.field("APR %", "rate")
         self.years = self.field("Years", "years")
         self.big, self.sub = self.results()
+        self.extra = self.extra_line(fg="muted")
         self.actions()
 
     def refresh(self):
@@ -1208,12 +1614,19 @@ class LoanTool(Tool):
                               parse_amount(self.years.get()))
         if pay is None:
             self.big.set("")
-            self.sub.set("")
+            self.sub.set("" if (self.principal.get() or self.rate.get()
+                                or self.years.get()) else self.HINT)
+            self.extra.set("")
             return
-        total = pay * int(float(self.years.get()) * 12)
+        n = int(float(self.years.get()) * 12)
+        total = pay * n
         self.big.set(f"{format_usd(pay)} / month")
         self.sub.set(f"Total paid: {format_usd(total)} · "
                      f"Interest: {format_usd(total - principal)}")
+        payoff = add_months(date.today(), n)
+        share = (total - principal) / principal * 100 if principal else 0
+        self.extra.set(f"Paid off ≈ {payoff:%b %Y} · {n} payments · "
+                       f"interest {share:.0f}% of principal")
 
     def copy_text(self):
         joined = " · ".join(x for x in (self.big.get(), self.sub.get()) if x)
@@ -1223,6 +1636,8 @@ class LoanTool(Tool):
 class ZoneTool(Tool):
     key, title = "zones", "Time Zones"
     note = TIMEZONE_FALLBACK_NOTE
+    MULTI = (("UTC", "UTC"), ("NY", "US/Eastern"), ("LA", "US/Pacific"),
+             ("London", "Europe/London"), ("Tokyo", "Asia/Tokyo"))
 
     def build(self):
         self.heading()
@@ -1233,6 +1648,7 @@ class ZoneTool(Tool):
                                                  default="Asia/Tokyo")
         self.when = self.field("When (YYYY-MM-DD HH:MM, blank = now)", "when")
         self.big, self.sub = self.results()
+        self.extra = self.extra_line(fg="muted")
         self.actions()
 
     def clear(self):
@@ -1242,9 +1658,19 @@ class ZoneTool(Tool):
     def refresh(self):
         a_name, b_name = self.vars["zone_a"].get(), self.vars["zone_b"].get()
         text = self.when.get().strip()
-        moment, parsed_ok = self._moment(a_name, text)
-        converted = self._to_zone(moment, b_name)
-        minutes = int((converted.utcoffset() - moment.utcoffset()).total_seconds() // 60)
+        try:
+            moment, parsed_ok = self._moment(a_name, text)
+            converted = self._to_zone(moment, b_name)
+            off_a, off_b = moment.utcoffset(), converted.utcoffset()
+            if off_a is None or off_b is None:
+                raise ValueError("missing utc offset")
+            minutes = int((off_b - off_a).total_seconds() // 60)
+        except Exception:
+            self.big.set("Time zones unavailable for that selection.")
+            self.sub.set("")
+            self.extra.set("")
+            self.mark("when", bool(text))
+            return
         if minutes == 0:
             diff_text = "same time"
         else:
@@ -1258,6 +1684,18 @@ class ZoneTool(Tool):
         hint = " · couldn't read that time — showing now" if text and not parsed_ok else ""
         self.sub.set(f"{moment:%Y-%m-%d %H:%M} in {a_short}{extra}{hint}")
         self.mark("when", bool(text) and not parsed_ok)
+        self.extra.set(self._multi_zone())
+
+    @staticmethod
+    def _multi_zone():
+        now = datetime.now(timezone.utc)
+        bits = []
+        for label, name in ZoneTool.MULTI:
+            try:
+                bits.append(f"{label} {now.astimezone(get_zone(name)):%H:%M}")
+            except Exception:
+                continue
+        return ("Now: " + " · ".join(bits)) if bits else ""
 
     @staticmethod
     def _moment(zone_name, text):
@@ -1306,7 +1744,8 @@ class BaseTool(Tool):
     def build(self):
         self.heading()
         pairs = [(label, str(base)) for label, base in self.BASES]
-        self.base_var, _ = self.dropdown_field("Input base", pairs, "base", default="10")
+        self.base_var, self.base_dd = self.dropdown_field("Input base", pairs, "base",
+                                                         default="10")
         self.value = self.field("Value", "value")
         self.big, self.sub = self.results()
         self.actions()
@@ -1353,6 +1792,8 @@ class App:
         self.root = root
         self.config = config
         self.theme = config.get("theme") if config.get("theme") in THEMES else "dark"
+        self.reduce_motion = bool(config.get("reduce_motion", False))
+        self.config["reduce_motion"] = self.reduce_motion
         self.tags = []       # [widget, bg_role, fg_role, kind]
         self.buttons = []    # RoundedButtons
         self.dropdowns = []  # themed Dropdown widgets
@@ -1360,12 +1801,18 @@ class App:
         self.tab_buttons = {}
         self.current_key = None
         self._status_job = None
+        self._fit_job = None
+        self._theme_job = None
+        self._theme_gen = 0
+        self._animating = False
+        self._aurora_t = 0.35
+        self._aurora_items = []
         self._colors = dict(THEMES[self.theme])
         self.fx = FX(root)
         self._window_size = None
 
         root.title(APP_TITLE)
-        root.minsize(700, 460)
+        root.minsize(760, 560)
         self._build_shell()
         self._start_aurora()      # canvas first so the tool cards stack above it
         self._build_tools()
@@ -1373,17 +1820,24 @@ class App:
         self._apply_windows_chrome()
 
         # Only restore fields that were actually saved so dropdowns keep defaults.
-        inputs = config.get("inputs", {})
+        inputs = config.get("inputs")
+        if not isinstance(inputs, dict):
+            inputs = {}
         for tool_key, tool in self.tools.items():
-            saved = inputs.get(tool_key, {})
+            saved = inputs.get(tool_key)
+            if not isinstance(saved, dict):
+                continue
             for field_key, var in tool.vars.items():
-                if field_key in saved:
+                if field_key in saved and isinstance(saved[field_key], str):
                     var.set(saved[field_key] or "")
         for tool in self.tools.values():  # populate default results (e.g. zones = now)
             tool.refresh()
         self._bind_keys()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.select_tool(config.get("tool") if config.get("tool") in self.tools else "devex")
+        self._size_initial_window()
+        self.root.after(0, self._apply_fit)
+        self.root.after(80, self._apply_windows_chrome)
 
     # -- theme registry -----------------------------------------------------
     def tag(self, widget, bg=None, fg=None, kind=None):
@@ -1394,32 +1848,99 @@ class App:
         return self._colors
 
     def apply_theme(self, theme_name):
-        """Cross-fade the palette over ~260ms, then settle exactly on target."""
+        """Cross-fade the palette in deliberate steps, then settle exactly."""
+        if theme_name not in THEMES:
+            return
         target = THEMES[theme_name]
+        changed = theme_name != self.theme
         self.theme = theme_name
+        self.config["theme"] = theme_name
         start = dict(self._colors)
-        if start == target:
+        self._theme_gen += 1
+        gen = self._theme_gen
+        if self._theme_job is not None:
+            try:
+                self.root.after_cancel(self._theme_job)
+            except Exception:
+                pass
+            self._theme_job = None
+        if self.reduce_motion or not changed:
             self._colors = dict(target)
             self._paint(self._colors)
-        else:
-            def step(t):
-                self._colors = {
-                    k: (mix(start[k], target[k], t)
-                        if isinstance(start[k], str) and isinstance(target[k], str)
-                        else target[k])  # hover_up is a flag, not a color
-                    for k in target}
-                self._paint(self._colors)
-            def done():
+            self._apply_windows_chrome()
+            save_config(self.collect_config())
+            return
+
+        def tick(i):
+            if gen != self._theme_gen:
+                return
+            t = ease_out(i / THEME_FADE_STEPS)
+            self._colors = {
+                k: (mix(start[k], target[k], t)
+                    if isinstance(start[k], str) and isinstance(target[k], str)
+                    else target[k])  # hover_up is a flag, not a color
+                for k in target}
+            # Only the visible tool's glow is repainted mid-fade; the other
+            # nine settle once at the end.
+            self._paint(self._colors, final=False)
+            if i < THEME_FADE_STEPS:
+                self._theme_job = self.root.after(
+                    max(10, THEME_FADE_MS // THEME_FADE_STEPS), lambda: tick(i + 1))
+            else:
+                self._theme_job = None
                 self._colors = dict(target)
-                self._paint(target)
-            self.fx.start("themefade", 260, step, done=done)
-        self.config["theme"] = theme_name
-        save_config(self.collect_config())
+                self._paint(self._colors, final=True)
+                self._apply_windows_chrome()
+                save_config(self.collect_config())
+
+        self._theme_job = self.root.after(10, lambda: tick(0))
 
     def toggle_theme(self):
         self.apply_theme("light" if self.theme == "dark" else "dark")
 
-    def _paint(self, c):
+    def toggle_reduce_motion(self):
+        self.reduce_motion = not self.reduce_motion
+        self.config["reduce_motion"] = self.reduce_motion
+        self._sync_motion()
+        save_config(self.collect_config())
+        self.flash("Reduced motion on" if self.reduce_motion else "Full motion on")
+
+    def _sync_motion(self):
+        """Apply a live reduce-motion change: stop/start loops, snap in-flight UI."""
+        self.motion_btn.set_text("Motion: reduced" if self.reduce_motion
+                                 else "Motion: full")
+        self.fx.cancel("aurora")
+        for tool in self.tools.values():
+            self.fx.cancel(f"warn{tool.key}")
+            if hasattr(tool, "warn_lbl"):
+                try:
+                    tool.warn_lbl.config(fg=self.colors["warning"])
+                except tk.TclError:
+                    pass
+        if self.reduce_motion:
+            self._animating = False
+            for key in self.tools:
+                for prefix in ("in", "out", "badge", "warn"):
+                    self.fx.cancel(f"{prefix}{key}")
+            for key, tool in self.tools.items():
+                if key != self.current_key:
+                    try:
+                        if tool.frame.winfo_manager() == "place":
+                            tool.frame.place_forget()
+                    except tk.TclError:
+                        pass
+            if self.current_key:
+                cur = self.current()
+                try:
+                    cur.frame.place_configure(x=6)
+                except tk.TclError:
+                    pass
+                cur._draw_glow()
+            self._draw_aurora(self._aurora_t)
+        else:
+            self.fx.start("aurora", 14000, self._draw_aurora, loop=True)
+
+    def _paint(self, c, final=True):
         """Apply a full color dictionary to every registered widget."""
         self.root.configure(bg=c["bg"])
         for widget, bg, fg, kind in self.tags:
@@ -1440,9 +1961,21 @@ class App:
             button.retheme(c)
         for dd in self.dropdowns:
             dd.retheme(c)
-        for tool in self.tools.values():
-            tool.retheme(c)
+        if hasattr(self, "aurora"):
+            try:
+                self.aurora.configure(bg=c["bg"])
+            except tk.TclError:
+                pass
+        if final:
+            for tool in self.tools.values():
+                tool.retheme(c)
+        elif self.current_key:
+            self.current().retheme(c)
         self.theme_btn.set_text("☀ Light" if self.theme == "dark" else "☾ Dark")
+        self.motion_btn.set_text("Motion: reduced" if self.reduce_motion
+                                 else "Motion: full")
+        if final and self.reduce_motion and hasattr(self, "aurora"):
+            self._draw_aurora(self._aurora_t)
 
     # -- Windows chrome -------------------------------------------------------
     def _apply_windows_chrome(self):
@@ -1470,29 +2003,58 @@ class App:
         """Slow drifting glow behind the tool cards (canvas-drawn, no shaders)."""
         self.aurora = tk.Canvas(self.content, bd=0, highlightthickness=0)
         self.aurora.pack(fill="both", expand=True)
+        self.aurora.bind("<Configure>", self._on_aurora_configure)
+        self._aurora_items = []
+        if self.reduce_motion:
+            self._draw_aurora(self._aurora_t)
+        else:
+            self.fx.start("aurora", 14000, self._draw_aurora, loop=True)
 
-        def drift(t):
-            self._draw_aurora(t)
-        self.fx.start("aurora", 12000, drift, loop=True)
+    def _on_aurora_configure(self, _event):
+        if self.reduce_motion:
+            self._draw_aurora(self._aurora_t)
 
     def _draw_aurora(self, t):
         cv = self.aurora
-        cv.delete("all")
+        self._aurora_t = t
+        try:
+            # Skip all redraw work while minimized or not yet mapped.
+            if self.root.state() == "iconic" or not cv.winfo_ismapped():
+                return
+        except tk.TclError:
+            return
         c = self._colors
-        cv.config(bg=c["bg"])
-        w = max(cv.winfo_width(), 10)
-        h = max(cv.winfo_height(), 10)
+        try:
+            cv.config(bg=c["bg"])
+            w, h = cv.winfo_width(), cv.winfo_height()
+        except tk.TclError:
+            return
+        if w < 10 or h < 10:
+            return
         strength = 0.55
+        ovals = []
         for cx, cy, color, phase in ((0.30, 0.30, c["glow1"], 0.0),
                                      (0.78, 0.68, c["glow2"], 2.1)):
             dx = math.sin((t * 2 + phase) * 6.283) * w * 0.06
             dy = math.cos((t * 3 + phase) * 6.283) * h * 0.07
             rx, ry = w * 0.42, h * 0.52
-            for i in range(1, 11):
-                fade = strength * (1 - i / 10) ** 1.4
-                cv.create_oval(cx * w + dx - rx * i / 10, cy * h + dy - ry * i / 10,
-                               cx * w + dx + rx * i / 10, cy * h + dy + ry * i / 10,
-                               fill=mix(c["bg"], color, fade), width=0)
+            for i in range(1, AURORA_RINGS + 1):
+                frac = i / AURORA_RINGS
+                fade = strength * (1 - frac) ** 1.4
+                x0 = cx * w + dx - rx * frac
+                y0 = cy * h + dy - ry * frac
+                ovals.append((x0, y0, cx * w + dx + rx * frac, cy * h + dy + ry * frac,
+                              mix(c["bg"], color, fade)))
+        try:
+            if len(self._aurora_items) != len(ovals):
+                cv.delete("all")
+                self._aurora_items = [cv.create_oval(0, 0, 0, 0, width=0)
+                                      for _ in ovals]
+            for item, (x0, y0, x1, y1, fill) in zip(self._aurora_items, ovals):
+                cv.coords(item, x0, y0, x1, y1)
+                cv.itemconfig(item, fill=fill)
+        except tk.TclError:
+            self._aurora_items = []
 
     # -- layout ---------------------------------------------------------------
     def _build_shell(self):
@@ -1506,10 +2068,19 @@ class App:
                            font=("Segoe UI", 9))
         ver_lbl.pack(side="left", padx=(10, 0))
         self.tag(ver_lbl, bg="side", fg="muted")
+        ui9 = tkfont.Font(family="Segoe UI", size=9)
+        bold9 = tkfont.Font(family="Segoe UI", size=9, weight="bold")
         self.theme_btn = RoundedButton(self, header, "☀ Light", self.toggle_theme,
-                                       width=86, height=28, role="ghost",
+                                       width=max(86, ui9.measure("☀ Light") + 26),
+                                       height=28, role="ghost",
                                        font=("Segoe UI", 9), canvas_role="side")
         self.theme_btn.pack(side="right")
+        self.motion_btn = RoundedButton(self, header, "Motion: full",
+                                        self.toggle_reduce_motion,
+                                        width=max(104, ui9.measure("Motion: reduced") + 26),
+                                        height=28, role="ghost",
+                                        font=("Segoe UI", 9), canvas_role="side")
+        self.motion_btn.pack(side="right", padx=(0, 8))
         self.header_frame = header
 
         self.sidebar = tk.Frame(self.root, padx=10, pady=12)
@@ -1519,6 +2090,7 @@ class App:
         self.content = tk.Frame(self.root)
         self.content.pack(side="right", fill="both", expand=True)
         self.tag(self.content, bg="bg")
+        self.content.bind("<Configure>", self._on_content_resize)
 
         self.status = tk.Label(self.root, text="", font=("Segoe UI", 9), anchor="e")
         self.status.pack(side="bottom", fill="x", padx=14, pady=(0, 6))
@@ -1527,77 +2099,211 @@ class App:
     def _build_tools(self):
         for tool_cls in self.TOOLS:
             self.tools[tool_cls.key] = tool_cls(self, self.content)
+        bold9 = tkfont.Font(family="Segoe UI", size=9, weight="bold")
+        tab_w = max(150, max(bold9.measure(f"{(idx + 1) % 10}  {cls.title}")
+                             for idx, cls in enumerate(self.TOOLS)) + 26)
         for idx, tool_cls in enumerate(self.TOOLS):
             label = f"{(idx + 1) % 10}  {tool_cls.title}"
             btn = RoundedButton(self, self.sidebar, label,
                                 lambda k=tool_cls.key: self.select_tool(k),
-                                width=150, height=30, role="tab", font=("Segoe UI", 9, "bold"),
-                                canvas_role="side")
+                                width=tab_w, height=30, role="tab",
+                                font=("Segoe UI", 9, "bold"), canvas_role="side")
             btn.pack(fill="x", pady=2)
             self.tab_buttons[tool_cls.key] = btn
-        hint = tk.Label(self.sidebar, text="Ctrl+1–0 switch\nEnter copy · Esc clear",
+        hint = tk.Label(self.sidebar,
+                        text="Ctrl+1–0 tools · Ctrl+T theme\nCtrl+M motion · Enter copy\n"
+                             "Esc clear · Copy all copies every line",
                         font=("Segoe UI", 8), justify="left")
         hint.pack(side="bottom", pady=(8, 0))
         self.tag(hint, bg="side", fg="muted")
 
-    def _fit_window(self):
-        """Size the window to the active card so nothing clips at 150% DPI too."""
-        tool = self.current()
+    def _size_initial_window(self):
+        """One fixed starting size = fits the tallest tool. Switching tools then
+        never resizes the window mid-animation, and the user can resize freely."""
         self.root.update_idletasks()
-        card_w = max(tool.frame.winfo_reqwidth(), 560)
-        card_h = tool.frame.winfo_reqheight()
-        if card_h < 40 or not card_w:
-            self.root.after(40, self._fit_window)
-            return
-        width = max(700, self.sidebar.winfo_reqwidth() + card_w + 60)
-        height = (self.header_frame.winfo_reqheight() + card_h +
+        max_w, max_h = 560, 200
+        for tool in self.tools.values():
+            max_w = max(max_w, tool.frame.winfo_reqwidth())
+            max_h = max(max_h, tool.frame.winfo_reqheight())
+        side_w = self.sidebar.winfo_reqwidth()
+        width = max(780, side_w + max_w + 60)
+        height = (self.header_frame.winfo_reqheight() + max_h +
                   self.status.winfo_reqheight() + 52)
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        width = min(width, max(760, sw - 80))
+        height = min(height, max(560, sh - 80))
         self._window_size = (width, height)
         self.root.geometry(f"{width}x{height}")
-        tool.frame.place_configure(width=max(300, self.content.winfo_width() - 12),
-                                   height=card_h)
+
+    def _on_content_resize(self, event):
+        """Manual window resizes reflow the active card (height stays natural)."""
+        if event.width < 20 or not self.current_key:
+            return
+        try:
+            frame = self.current().frame
+            if frame.winfo_manager() == "place":
+                frame.place_configure(width=max(300, event.width - 12))
+                frame.place_configure(height=max(frame.winfo_reqheight(), 60))
+        except tk.TclError:
+            pass
+
+    def schedule_fit(self, delay=80):
+        """Debounced re-measure after content changes (warnings appearing, etc.)."""
+        if not self.current_key:
+            return
+        if self._fit_job is not None:
+            try:
+                self.root.after_cancel(self._fit_job)
+            except Exception:
+                pass
+        self._fit_job = self.root.after(delay, self._apply_fit)
+
+    def _apply_fit(self):
+        self._fit_job = None
+        if not self.current_key:
+            return
+        if self._animating:
+            self._fit_job = self.root.after(140, self._apply_fit)
+            return
+        try:
+            self.root.update_idletasks()
+            tool = self.current()
+            req_h = max(tool.frame.winfo_reqheight(), 60)
+            content_w = self.content.winfo_width()
+            if content_w > 20:
+                tool.frame.place_configure(width=max(300, content_w - 12))
+            tool.frame.place_configure(height=req_h)
+            # Only ever GROW the window; shrinking is the user's call.
+            if self.root.winfo_viewable():
+                avail = self.content.winfo_height()
+                shortfall = (req_h + 12) - avail
+                if shortfall > 2:
+                    self.root.geometry(f"{self.root.winfo_width()}x"
+                                       f"{self.root.winfo_height() + shortfall}")
+        except tk.TclError:
+            pass
 
     # -- tool switching / actions ----------------------------------------------
     def current(self):
         return self.tools[self.current_key]
 
+    def _place_tool(self, tool, x):
+        req_h = tool.frame.winfo_reqheight()
+        if req_h < 40:
+            req_h = max(200, self.content.winfo_height() - 12)
+        opts = {"in_": self.content, "x": x, "y": 6, "height": req_h}
+        cw = self.content.winfo_width()
+        if cw > 20:
+            opts["width"] = max(300, cw - 12)
+        tool.frame.place(**opts)
+        tool.frame.lift()  # incoming card must sit above the outgoing one
+
     def select_tool(self, key):
-        if key == self.current_key or key not in self.tools:
+        if key not in self.tools or key == self.current_key:
             return
-        old_key, self.current_key = self.current_key, key
-        tool = self.tools[key]
-        # Sliding transition: exit-left for the old card, enter-from-right for the new.
+        old_key = self.current_key
+        # Cancel stale transitions and hide any card that is neither the
+        # outgoing nor the incoming one (rapid Ctrl+1..0 mashed together).
+        for k in self.tools:
+            if k not in (key, old_key):
+                self.fx.cancel(f"in{k}")
+                self.fx.cancel(f"out{k}")
+                try:
+                    if self.tools[k].frame.winfo_manager() == "place":
+                        self.tools[k].frame.place_forget()
+                except tk.TclError:
+                    pass
         if old_key:
             self.collect_inputs(old_key)
-            old = self.tools[old_key]
-            old_x = int(old.frame.place_info()["x"] or 6)
-            def slide_out(t):
-                old.frame.place_configure(x=old_x - int(30 * t))
-            self.fx.start(f"out{old_key}", 140, slide_out,
-                          done=lambda: old.frame.place_forget())
+            self.fx.cancel(f"in{old_key}")
             self.tab_buttons[old_key].role = "tab"
             self.tab_buttons[old_key].retheme(self.colors)
-        tool.frame.place(in_=self.content, x=36, y=6, bordermode="outside")
+        self.fx.cancel(f"out{key}")  # user may be switching back mid-slide
+        self.current_key = key
+        tool = self.tools[key]
 
-        def slide_in(t):
+        self.root.update_idletasks()
+        animate = bool(old_key) and not self.reduce_motion
+        self._animating = animate
+        self._place_tool(tool, 36 if animate else 6)
+
+        if old_key:
+            old = self.tools[old_key]
             try:
-                tool.frame.place_configure(x=6 + int(30 * (1 - t)))
+                old_x = int(old.frame.place_info().get("x") or 6)
+            except (ValueError, TypeError):
+                old_x = 6
+            if self.reduce_motion:
+                try:
+                    old.frame.place_forget()
+                except tk.TclError:
+                    pass
+            else:
+                def slide_out(t):
+                    try:
+                        old.frame.place_configure(x=old_x - int(26 * t))
+                    except tk.TclError:
+                        pass
+
+                def hide_old():
+                    try:
+                        old.frame.place_forget()
+                    except tk.TclError:
+                        pass
+
+                self.fx.start(f"out{old_key}", 150, slide_out, done=hide_old)
+
+        if animate:
+            def slide_in(t):
+                try:
+                    tool.frame.place_configure(x=6 + int(30 * (1 - t)))
+                except tk.TclError:
+                    pass
+            self.fx.start(f"in{key}", 170, slide_in,
+                          done=lambda: self._slide_finished(tool))
+        else:
+            try:
+                tool.frame.place_configure(x=6)
             except tk.TclError:
                 pass
-        self.fx.start(f"in{key}", 170, slide_in)
+            self._apply_fit()
+
         self.tab_buttons[key].role = "tab_active"
         self.tab_buttons[key].retheme(self.colors)
         tool.animate_entry()
         self.config["tool"] = key
+        self.root.title(f"{APP_TITLE} — {tool.title}")
         save_config(self.collect_config())
-        self._fit_window()
-        self.root.after(80, self._fit_window)  # second pass once fully mapped
-        self.root.after(80, lambda: (tool.focus_primary(), self._apply_windows_chrome()))
+        self.root.after(60, self._focus_current)
+
+    def _slide_finished(self, tool):
+        try:
+            tool.frame.place_configure(x=6)
+        except tk.TclError:
+            return
+        self._animating = False
+        self._apply_fit()
+
+    def _focus_current(self):
+        if not self.current_key:
+            return
+        self.current().focus_primary()
+        self._apply_windows_chrome()
 
     def collect_inputs(self, tool_key):
-        saved = self.config.setdefault("inputs", {}).setdefault(tool_key, {})
+        inputs = self.config.get("inputs")
+        if not isinstance(inputs, dict):
+            inputs = {}
+            self.config["inputs"] = inputs
+        saved = inputs.get(tool_key)
+        if not isinstance(saved, dict):
+            saved = {}
+            inputs[tool_key] = saved
         for field_key, var in self.tools[tool_key].vars.items():
-            saved[field_key] = var.get()
+            try:
+                saved[field_key] = var.get()
+            except tk.TclError:
+                pass
 
     def collect_config(self):
         for key in self.tools:  # every tool's fields, so switching is not required
@@ -1605,11 +2311,19 @@ class App:
         return self.config
 
     def copy_current(self):
-        text = self.current().copy_text()
+        self._copy_text(self.current().copy_text())
+
+    def copy_all_current(self):
+        self._copy_text(self.current().copy_all_text())
+
+    def _copy_text(self, text):
         if text:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.flash("Copied to clipboard")
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(text)
+                self.flash("Copied to clipboard")
+            except tk.TclError:
+                self.flash("Clipboard unavailable")
         else:
             self.flash("Nothing to copy")
 
@@ -1619,7 +2333,10 @@ class App:
 
     def flash(self, message):
         if self._status_job:
-            self.root.after_cancel(self._status_job)
+            try:
+                self.root.after_cancel(self._status_job)
+            except Exception:
+                pass
         self.status.config(text=message)
         self._status_job = self.root.after(1600, lambda: self.status.config(text=""))
 
@@ -1629,12 +2346,15 @@ class App:
                            lambda _e, k=tool_cls.key: self.select_tool(k))
         self.root.bind("<Escape>", lambda _e: self.clear_current())
         self.root.bind("<Return>", lambda _e: self.copy_current())
+        self.root.bind("<Control-t>", lambda _e: self.toggle_theme())
+        self.root.bind("<Control-m>", lambda _e: self.toggle_reduce_motion())
         self.root.bind_class("Entry", "<Control-a>",
                              lambda e: (e.widget.select_range(0, "end"),
                                         e.widget.icursor("end"), "break")[2])
 
     def on_close(self):
         save_config(self.collect_config())
+        self.fx.stop()
         self.root.destroy()
 
 
@@ -1646,17 +2366,33 @@ def main():
 
 
 def enable_dpi_awareness():
-    """Crisp text on high-DPI displays. Must run before the Tk root exists."""
+    """Crisp text on high-DPI displays. Must run before the Tk root exists.
+
+    Prefer per-monitor awareness (2) so moving between monitors with different
+    scale factors stays sharp, then system awareness (1), then the legacy call.
+    """
     if os.name != "nt" or not getattr(ctypes, "windll", None):
         return
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # system DPI aware
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:
+            return
     except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+

@@ -10,24 +10,25 @@ No account linking, no tracking, no pip installs — a single Python file (and p
 | Roblox | Daily |
 |---|---|
 | **DevEx Cash-Out** — Robux ↔ USD at the published rate, with a live "you're N R$ short of the 30,000 minimum" warning | **Percentages** — three inline calculators (% of N / N is what % of / % change) |
-| **Buy Robux** — real store tiers (400 → 10,000), per-tier rate shown | **Unit Converter** — length, mass, volume, data sizes, temperature |
-| **Marketplace Fees** — 30% cut math + net after fees | **Date Calculator** — days between, ± N days with weekdays |
-| **Payout Splitter** — equal split with optional upfront cut, cents-safe leftover | **Loan / Growth** — amortized monthly payment, total interest |
-| | **Time Zones** — creator-schedule planning across zones |
-| | **Number Bases** — hex/octal/binary/decimal live conversion |
+| **Buy Robux** — real store tiers (400 → 10,000), per-tier rate, plus a cheapest-way-to-reach-N-R$ planner | **Unit Converter** — length, mass, volume, area, speed, energy, pressure, data sizes, temperature |
+| **Marketplace Fees** — 30% cut math; works both ways (gross → net or desired net → required gross) | **Date Calculator** — days between, business days, ± N days, + N business days, age today |
+| **Payout Splitter** — equal split with optional upfront cut, cents-safe leftover | **Loan / Growth** — amortized monthly payment, total interest, payoff month |
+
+Plus **Time Zones** (converter + "now" strip across five zones) and **Number Bases** (hex/octal/binary/decimal live conversion).
 
 ## Highlights
 
 - **Offline & private**: zero network calls, zero telemetry. Settings live in `%LOCALAPPDATA%\DevexCalculator\config.json`.
 - **True rates**: the DevEx conversion constant sits at the top of the source for easy updating; every grouped payout stays cents-accurate (Decimal, half-up).
-- **Themed UI**: dark by default, light toggle with cross-fade, animated aurora background, sliding transitions, DPI-aware, dark Windows 11 title bar.
-- **Keyboard-first**: `Ctrl+1–0` switch tools · `Enter` copy result · `Esc` clear · `Ctrl+A` select-all in fields.
-- **Never crashes on bad input**: invalid fields get a soft red border, not an error dialog.
+- **Smooth by default**: 60 fps animation timer, drifting aurora, eased hovers, sliding tool transitions and a theme cross-fade — with a persisted **Reduce motion** switch for accessibility and low-end machines.
+- **Themed UI**: dark by default, light toggle, DPI-aware (per-monitor when available), matched Windows title-bar color.
+- **Keyboard-first**: `Ctrl+1–0` switch tools · `Ctrl+T` theme · `Ctrl+M` reduce motion · `Enter` copy result · `Esc` clear · `Ctrl+A` select-all in fields. Every tool also has **Copy all**.
+- **Never crashes on bad input**: invalid fields get a red border (even while focused), never an error dialog; malformed settings files are ignored safely.
 
 ## Download
 
 Grab the ready-to-run `DevToolkit.exe` (≈10 MB, Windows 10/11) from **[Releases](../../releases)**.
-No Python needed. Paranoid-friendly build: verify the `.exe` on VirusTotal, or build it yourself from source below.
+No Python needed. The exe is built without UPX (fewer antivirus false positives); it is still unsigned, so SmartScreen may ask once. Verify the SHA-256 in the release notes, or build it yourself from source below.
 
 ## Build from source
 
@@ -39,6 +40,8 @@ python devex_calculator.py
 python make_icon.py            # regenerates the icon
 python -m PyInstaller DevToolkit.spec
 ```
+
+The spec sets `upx=False` deliberately: UPX-packed Python executables are a common antivirus false-positive trigger. Leave it off for a release build.
 
 ## Notes for contributors
 
